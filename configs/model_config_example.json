@@ -1,0 +1,9 @@
+{
+  "model_path": "/home/caden/workplace/models/Qwen2.5-Omni-3B",
+  "preset": "low_vram",
+  "custom_settings": {
+    "max_new_tokens": 256,
+    "temperature": 0.7,
+    "load_thinker_only": true
+  }
+}

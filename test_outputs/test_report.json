@@ -1,0 +1,52 @@
+{
+  "summary": {
+    "total_tests": 6,
+    "passed": 1,
+    "failed": 1,
+    "skipped": 4,
+    "success_rate": 16.666666666666664
+  },
+  "test_results": {
+    "dependencies": {
+      "status": "passed",
+      "available_dependencies": [
+        "torch 2.7.1+cu126",
+        "transformers 4.55.1",
+        "gradio 5.23.1",
+        "librosa 0.11.0",
+        "soundfile 0.13.1",
+        "cv2 4.12.0",
+        "PIL 11.3.0",
+        "numpy 2.2.6"
+      ],
+      "missing_dependencies": [],
+      "cuda_available": true
+    },
+    "memory_management": {
+      "status": "failed",
+      "error": "type object 'MemoryPresets' has no attribute 'list_presets'"
+    },
+    "video_processing": {
+      "status": "skipped",
+      "reason": "无测试视频"
+    },
+    "video_optimization": {
+      "status": "skipped",
+      "reason": "无测试视频"
+    },
+    "conversation_creation": {
+      "status": "skipped",
+      "reason": "无测试视频"
+    },
+    "model_loading": {
+      "status": "skipped",
+      "reason": "模型路径不存在: /home/caden/workplace/models/Qwen2.5-Omni-3B"
+    }
+  },
+  "timestamp": "2025-08-14 00:38:47",
+  "environment": {
+    "python_version": "3.12.2 | packaged by conda-forge | (main, Feb 16 2024, 20:50:58) [GCC 12.3.0]",
+    "working_directory": "/home/caden/workspace/Qwen2.5-Omni-VideoFollow",
+    "model_path": "未设置"
+  }
+}
