@@ -1,0 +1,29 @@
+# 多模态视频处理服务依赖
+
+# 核心依赖
+torch>=2.0.0
+numpy>=1.24.0
+Pillow>=10.0.0
+
+# 音频处理
+librosa>=0.11.0
+soundfile>=0.13.1
+ffmpeg-python>=0.2.0
+
+# 视频和图像处理
+opencv-python>=4.8.0
+av>=10.0.0
+
+# Web界面
+gradio>=4.0.0
+
+# 其他工具
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# 可选：GPU加速
+# torchvision>=0.15.0
+# torchaudio>=2.0.0
+
+# 可选：Qwen相关
+# qwen-omni-utils>=0.0.4

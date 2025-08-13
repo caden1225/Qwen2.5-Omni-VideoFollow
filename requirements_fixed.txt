@@ -1,0 +1,29 @@
+# Core dependencies
+requests>=2.31.0
+Pillow>=10.0.0
+numpy>=1.24.0
+python-dotenv>=1.0.0
+
+# Transformers and PyTorch
+transformers>=4.52.0
+torch>=2.0.0
+accelerate>=0.20.0
+safetensors>=0.3.0
+
+# Audio and video processing
+librosa>=0.11.0
+ffmpeg-python>=0.2.0
+soundfile>=0.13.1
+av>=10.0.0
+
+# Qwen specific
+qwen-omni-utils>=0.0.4
+
+# Optional: GPTQ support (if available)
+# gptqmodel
+
+# Optional: Flash attention (if available)
+# flash-attn>=2.7.4.post1
+
+
+

@@ -16,9 +16,15 @@ import torch
 import time
 import soundfile as sf
 import os
+from dotenv import load_dotenv
 
-# 使用本地模型路径
-model_path = "/home/caden/workplace/models/Qwen2.5-Omni-3B"
+# 加载.env文件
+load_dotenv()
+
+# 从.env文件获取模型路径
+model_path = os.getenv("MODEL_PATH")
+if not model_path:
+    raise ValueError("MODEL_PATH not found in .env file")
 
 class Qwen25OmniThinkerGPTQ(BaseGPTQModel):
     loader = Qwen2_5OmniForConditionalGeneration
