@@ -58,7 +58,7 @@ load_dotenv()
 model_path = os.getenv("MODEL_PATH", "/home/caden/workplace/models/Qwen2.5-Omni-3B")
 if not model_path:
     print("Warning: MODEL_PATH not found in .env file, using default path")
-    model_path = "/home/caden/workplace/models/Qwen2.5-Omni-3B"
+    model_path = "/home/caden/models/Qwen2.5-Omni-3B"
 
 # 检查模型路径是否存在
 if not os.path.exists(model_path):

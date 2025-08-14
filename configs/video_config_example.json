@@ -1,8 +1,0 @@
-{
-  "optimization_preset": "balanced",
-  "custom_settings": {
-    "max_frames": 6,
-    "max_resolution": 224,
-    "compression_quality": 85
-  }
-}
