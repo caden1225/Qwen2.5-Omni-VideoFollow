@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Qwen2.5-Omni 多模态Gradio界面
+Qwen2.5-Omni 端侧部署-云端测试-Gradio界面
 支持视频、语音、图像、文本等不同模态的组合输入
 支持GPTQ量化版本以降低显存占用
 """
@@ -535,7 +535,7 @@ class MultimodalProcessor:
                 images=images, 
                 videos=videos, 
                 return_tensors="pt", 
-                use_audio_in_video= not audios.is_empty(),
+                use_audio_in_video= not audios,
                 padding=True
             )
             
@@ -903,7 +903,7 @@ processor = MultimodalProcessor()
 def create_interface():
     with gr.Blocks(title="Qwen2.5-Omni 多模态助手", theme=gr.themes.Soft()) as demo:
         gr.Markdown("""
-        # 🤖 Qwen2.5-Omni 多模态智能助手
+        # 🤖 Qwen2.5-Omni 端侧部署-云端测试-Gradio界面
         """)
         
         with gr.Row():
