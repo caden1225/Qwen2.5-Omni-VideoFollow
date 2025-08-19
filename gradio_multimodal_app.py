@@ -22,13 +22,8 @@ import soundfile as sf
 # 导入qwen-omni-utils  
 from qwen_omni_utils import process_mm_info
 from transformers import Qwen2_5OmniProcessor
+from transformers import Qwen2_5OmniForConditionalGeneration
 
-
-try:
-    from transformers import Qwen2_5OmniForConditionalGeneration
-except ImportError:
-    print("❌ 无法导入模型，请检查环境配置")
-    raise
 
 # 加载环境变量
 load_dotenv()
@@ -110,17 +105,20 @@ class MultimodalProcessor:
                           max_tokens: int,
                           extract_video_audio: bool,
                           extract_video_frame: bool,
-                          enable_streaming: bool = False):
+                          using_mm_info_audio: bool,
+                          enable_streaming: bool = False,
+                          enable_audio_output: bool = False):
         """处理多模态输入"""
         
         if self.model is None:
-            return "❌ 请先加载模型", "", None, None, 0, 0
+            return "❌ 请先加载模型", "", None, None, 0, 0, None
         
         start_time = time.time()
         torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None
         
         extracted_audio = None
         extracted_frame = None
+        generated_audio = None
         
         try:
             # 构建消息
@@ -158,7 +156,8 @@ class MultimodalProcessor:
                         extracted_frame = features['last_frame']
                         print(f"✅ 图像已提取")
                 else:
-                    user_content.append({"type": "video", "video": video_input})
+                    # add args to qwen-mm-info-utils
+                    user_content.append({"type": "video", "video": video_input, "using_mm_info_audio": using_mm_info_audio})
             
             # 处理图像
             if image_input:
@@ -185,7 +184,7 @@ class MultimodalProcessor:
             print(f"📄 生成的prompt长度: {len(text_prompt)} 字符")
             
             # 处理多模态信息
-            audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
+            audios, images, videos = process_mm_info(messages, use_audio_in_video=using_mm_info_audio)
             print(f"📊 多模态处理结果: audios={len(audios) if audios else 0}, images={len(images) if images else 0}, videos={len(videos) if videos else 0}")
             
             # 处理输入
@@ -232,7 +231,7 @@ class MultimodalProcessor:
                         max_new_tokens=max_tokens,
                         do_sample=False,
                         use_audio_in_video=True,
-                        return_audio=False,
+                        return_audio=enable_audio_output,
                         pad_token_id=self.processor.tokenizer.eos_token_id
                     )
                     
@@ -257,11 +256,23 @@ class MultimodalProcessor:
                         max_new_tokens=max_tokens,
                         do_sample=False,  # 使用贪心解码
                         use_audio_in_video=True,
-                        return_audio=False,  # 禁用音频输出
+                        return_audio=enable_audio_output,  # 根据参数决定是否返回音频
                         pad_token_id=self.processor.tokenizer.eos_token_id
                     )
                 
                 print(f"📤 生成输出形状: {output.shape}")
+                
+                # 处理音频输出
+                if enable_audio_output and hasattr(output, 'audio') and output.audio is not None:
+                    try:
+                        # 保存生成的音频
+                        audio_filename = f"generated_audio_{int(time.time())}.wav"
+                        sf.write(audio_filename, output.audio.cpu().numpy(), 24000)  # Qwen2.5-Omni使用24kHz采样率
+                        generated_audio = audio_filename
+                        print(f"🎵 音频已生成并保存: {audio_filename}")
+                    except Exception as e:
+                        print(f"音频保存失败: {e}")
+                        generated_audio = None
                 
                 # 解码响应
                 response_text = self.processor.batch_decode(output, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
@@ -308,14 +319,14 @@ class MultimodalProcessor:
 ⏱️ 处理时间: {processing_time:.2f}秒
 💾 峰值显存: {peak_memory:.1f}MB"""
 
-            return status_info, response_text, extracted_audio, extracted_frame, processing_time, peak_memory
+            return status_info, response_text, extracted_audio, extracted_frame, processing_time, peak_memory, generated_audio
             
         except Exception as e:
             error_msg = f"❌ 处理失败: {str(e)}"
             print(error_msg)
             import traceback
             traceback.print_exc()
-            return error_msg, "", None, None, 0, 0
+            return error_msg, "", None, None, 0, 0, None
 
     def process_multimodal_streaming(self, 
                                    text_input: str,
@@ -325,11 +336,13 @@ class MultimodalProcessor:
                                    system_prompt: str,
                                    max_tokens: int,
                                    extract_video_audio: bool,
-                                   extract_video_frame: bool):
+                                   extract_video_frame: bool,
+                                   using_mm_info_audio: bool,
+                                   enable_audio_output: bool = False):
         """流式处理多模态输入 - 使用生成器返回逐步更新"""
         
         if self.model is None:
-            yield "❌ 请先加载模型", "", None, None
+            yield "❌ 请先加载模型", "", None, None, 0, 0, None
             return
         
         start_time = time.time()
@@ -337,10 +350,11 @@ class MultimodalProcessor:
         
         extracted_audio = None
         extracted_frame = None
+        generated_audio = None
         
         try:
             # 前期处理 - 和普通处理相同
-            yield "🔄 开始处理...", "", None, None
+            yield "🔄 开始处理...", "", None, None, 0, 0, None
             
             # 构建消息
             messages = [
@@ -356,7 +370,7 @@ class MultimodalProcessor:
             # 处理视频
             if video_input:
                 if extract_video_audio or extract_video_frame:
-                    yield "🎬 提取视频特征...", "", None, None
+                    yield "🎬 提取视频特征...", "", None, None, 0, 0, None
                     
                     features = self.extract_video_features(
                         video_input, 
@@ -374,7 +388,7 @@ class MultimodalProcessor:
                         user_content.append({"type": "image", "image": features['last_frame']})
                         extracted_frame = features['last_frame']
                         
-                    yield "✅ 视频特征提取完成", "", extracted_audio, extracted_frame
+                    yield "✅ 视频特征提取完成", "", extracted_audio, extracted_frame, 0, 0, None
                 else:
                     user_content.append({"type": "video", "video": video_input})
             
@@ -395,13 +409,13 @@ class MultimodalProcessor:
             
             messages.append({"role": "user", "content": user_content})
             
-            yield "📝 构建多模态输入...", "", extracted_audio, extracted_frame
+            yield "📝 构建多模态输入...", "", extracted_audio, extracted_frame, 0, 0, None
             
             # 应用聊天模板
             text_prompt = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             
             # 处理多模态信息
-            audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
+            audios, images, videos = process_mm_info(messages, use_audio_in_video=using_mm_info_audio)
             
             # 处理输入
             inputs = self.processor(
@@ -416,7 +430,7 @@ class MultimodalProcessor:
             device = next(self.model.parameters()).device
             inputs = inputs.to(device).to(self.model.dtype)
             
-            yield "🚀 开始流式生成...", "", extracted_audio, extracted_frame
+            yield "🚀 开始流式生成...", "", extracted_audio, extracted_frame, 0, 0, None
             
             # 流式生成
             from transformers import TextIteratorStreamer
@@ -435,7 +449,7 @@ class MultimodalProcessor:
                 max_new_tokens=max_tokens,
                 do_sample=False,
                 use_audio_in_video=True,
-                return_audio=False,
+                return_audio=enable_audio_output,
                 pad_token_id=self.processor.tokenizer.eos_token_id
             )
             
@@ -450,9 +464,20 @@ class MultimodalProcessor:
                     response_text += new_text
                     processing_time = time.time() - start_time
                     status = f"📡 流式生成中... ({processing_time:.1f}s)"
-                    yield status, response_text, extracted_audio, extracted_frame
+                    yield status, response_text, extracted_audio, extracted_frame, processing_time, 0, None
             
             thread.join()
+            
+            # 处理音频输出（流式模式下音频在最后生成）
+            if enable_audio_output:
+                try:
+                    # 这里需要重新生成一次来获取音频，或者修改流式逻辑
+                    # 为了简化，我们暂时在流式模式下不返回音频
+                    generated_audio = None
+                    print("📡 流式模式下音频输出暂不支持")
+                except Exception as e:
+                    print(f"流式音频处理失败: {e}")
+                    generated_audio = None
             
             # 最终结果
             processing_time = time.time() - start_time
@@ -463,11 +488,11 @@ class MultimodalProcessor:
 💾 峰值显存: {peak_memory:.1f}MB
 📝 输出长度: {len(response_text)} 字符"""
             
-            yield final_status, response_text, extracted_audio, extracted_frame
+            yield final_status, response_text, extracted_audio, extracted_frame, processing_time, peak_memory, generated_audio
             
         except Exception as e:
             error_msg = f"❌ 流式处理失败: {str(e)}"
-            yield error_msg, "", extracted_audio, extracted_frame
+            yield error_msg, "", extracted_audio, extracted_frame, 0, 0, None
 
 
 # 创建处理器实例
@@ -478,8 +503,6 @@ def create_interface():
     with gr.Blocks(title="Qwen2.5-Omni 多模态助手", theme=gr.themes.Soft()) as demo:
         gr.Markdown("""
         # 🤖 Qwen2.5-Omni 多模态智能助手
-        
-        支持文本、图像、音频、视频的多种组合输入，智能生成回答。
         """)
         
         with gr.Row():
@@ -517,12 +540,22 @@ def create_interface():
                     value=False,
                     info="将视频最后一帧提取为图像输入"
                 )
+                using_mm_info_audio = gr.Checkbox(
+                    label="🎵 使用mm_info提取音频",
+                    value=False,
+                    info="使用mm_info提取音频"
+                )
                 
                 gr.Markdown("### ⚡ 输出模式")
                 enable_streaming = gr.Checkbox(
                     label="📡 启用流式输出",
                     value=False,
                     info="实时逐步显示生成内容，提升交互体验"
+                )
+                enable_audio_output = gr.Checkbox(
+                    label="🎵 启用语音输出",
+                    value=False,
+                    info="生成语音回答（如果模型支持）"
                 )
             
             with gr.Column(scale=2):
@@ -584,6 +617,14 @@ def create_interface():
                             visible=True,
                             interactive=False
                         )
+                
+                # 显示生成的音频输出
+                gr.Markdown("### 🎤 生成的语音回答")
+                generated_audio_display = gr.Audio(
+                    label="AI生成的语音回答",
+                    visible=True,
+                    interactive=False
+                )
             
             with gr.Column(scale=1):
                 gr.Markdown("### 📊 处理信息")
@@ -602,36 +643,36 @@ def create_interface():
         )
         
         def handle_process_standard(text_input, image_input, audio_input, video_input, system_prompt, max_tokens, 
-                                   extract_video_audio, extract_video_frame, enable_streaming):
+                                   extract_video_audio, extract_video_frame, using_mm_info_audio, enable_streaming, enable_audio_output):
             """标准处理函数"""
             if enable_streaming:
                 # 如果启用流式，给出提示
-                return "📡 流式模式：请点击下面的流式处理按钮", "", None, None
+                return "📡 流式模式：请点击下面的流式处理按钮", "", None, None, None
             else:
                 # 使用标准处理
                 result = processor.process_multimodal(
                     text_input, image_input, audio_input, video_input,
-                    system_prompt, max_tokens, extract_video_audio, extract_video_frame, False
+                    system_prompt, max_tokens, extract_video_audio, extract_video_frame, using_mm_info_audio, False, enable_audio_output
                 )
-                return result[0], result[1], result[2], result[3]  # status, text, audio, image
+                return result[0], result[1], result[2], result[3], result[6]  # status, text, audio, image, generated_audio
         
         def handle_process_streaming(text_input, image_input, audio_input, video_input, system_prompt, max_tokens, 
-                                   extract_video_audio, extract_video_frame):
+                                   extract_video_audio, extract_video_frame, using_mm_info_audio, enable_audio_output):
             """流式处理函数"""
-            for status, text, audio, image in processor.process_multimodal_streaming(
+            for status, text, audio, image, time, memory, generated_audio in processor.process_multimodal_streaming(
                 text_input, image_input, audio_input, video_input,
-                system_prompt, max_tokens, extract_video_audio, extract_video_frame
+                system_prompt, max_tokens, extract_video_audio, extract_video_frame, using_mm_info_audio, enable_audio_output
             ):
-                yield status, text, audio, image
+                yield status, text, audio, image, generated_audio
         
         # 标准处理按钮
         process_btn.click(
             fn=handle_process_standard,
             inputs=[
                 text_input, image_input, audio_input, video_input,
-                system_prompt, max_tokens, extract_video_audio, extract_video_frame, enable_streaming
+                system_prompt, max_tokens, extract_video_audio, extract_video_frame, using_mm_info_audio, enable_streaming, enable_audio_output
             ],
-            outputs=[processing_info, output_text, extracted_audio_display, extracted_image_display]
+            outputs=[processing_info, output_text, extracted_audio_display, extracted_image_display, generated_audio_display]
         )
         
         # 流式按钮已在上面定义
@@ -640,9 +681,9 @@ def create_interface():
             fn=handle_process_streaming,
             inputs=[
                 text_input, image_input, audio_input, video_input,
-                system_prompt, max_tokens, extract_video_audio, extract_video_frame
+                system_prompt, max_tokens, extract_video_audio, extract_video_frame, using_mm_info_audio, enable_audio_output
             ],
-            outputs=[processing_info, output_text, extracted_audio_display, extracted_image_display]
+            outputs=[processing_info, output_text, extracted_audio_display, extracted_image_display, generated_audio_display]
         )
         
         # 根据流式开关控制按钮显示
@@ -659,11 +700,11 @@ def create_interface():
         )
         
         def clear_all():
-            return "", None, None, None, "", "等待处理...", None, None, False
+            return "", None, None, None, "", "等待处理...", None, None, False, None
         
         clear_btn.click(
             fn=clear_all,
-            outputs=[text_input, image_input, audio_input, video_input, output_text, processing_info, extracted_audio_display, extracted_image_display, enable_streaming]
+            outputs=[text_input, image_input, audio_input, video_input, output_text, processing_info, extracted_audio_display, extracted_image_display, enable_streaming, generated_audio_display]
         )
     
     return demo
