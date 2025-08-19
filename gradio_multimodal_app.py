@@ -2,13 +2,13 @@
 """
 Qwen2.5-Omni 多模态Gradio界面
 支持视频、语音、图像、文本等不同模态的组合输入
+支持GPTQ量化版本以降低显存占用
 """
 
 import os
 import time
 import logging
 from typing import List, Optional, Tuple, Dict, Any
-import tempfile
 
 import torch
 import numpy as np
@@ -24,6 +24,13 @@ from qwen_omni_utils import process_mm_info
 from transformers import Qwen2_5OmniProcessor
 from transformers import Qwen2_5OmniForConditionalGeneration
 
+# GPTQ相关导入
+from transformers.utils.hub import cached_file
+from gptqmodel import GPTQModel
+from gptqmodel.models.base import BaseGPTQModel
+from gptqmodel.models.auto import MODEL_MAP, SUPPORTED_MODELS
+from gptqmodel.models._const import CPU
+from huggingface_hub import snapshot_download
 
 # 加载环境变量
 load_dotenv()
@@ -31,6 +38,90 @@ load_dotenv()
 # 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# 定义GPTQ模型类
+class Qwen25OmniThinkerGPTQ(BaseGPTQModel):
+    loader = Qwen2_5OmniForConditionalGeneration
+    base_modules = [
+        "thinker.model.embed_tokens", 
+        "thinker.model.norm", 
+        "token2wav", 
+        "thinker.audio_tower", 
+        "thinker.model.rotary_emb",
+        "thinker.visual", 
+        "talker"
+    ]
+    pre_lm_head_norm_module = "thinker.model.norm"
+    require_monkeypatch = False
+    layers_node = "thinker.model.layers"
+    layer_type = "Qwen2_5OmniDecoderLayer"
+    layer_modules = [
+        ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
+        ["self_attn.o_proj"],
+        ["mlp.up_proj", "mlp.gate_proj"],
+        ["mlp.down_proj"],
+    ]
+   
+    def pre_quantize_generate_hook_start(self):
+        # 定义move_to函数
+        def move_to(tensor, device):
+            if hasattr(tensor, 'to'):
+                return tensor.to(device)
+            return tensor
+        
+        self.thinker.visual = move_to(self.thinker.visual, device=self.quantize_config.device)
+        self.thinker.audio_tower = move_to(self.thinker.audio_tower, device=self.quantize_config.device)
+
+    def pre_quantize_generate_hook_end(self):
+        # 定义move_to函数
+        def move_to(tensor, device):
+            if hasattr(tensor, 'to'):
+                return tensor.to(device)
+            return tensor
+        
+        self.thinker.visual = move_to(self.thinker.visual, device=CPU)
+        self.thinker.audio_tower = move_to(self.thinker.audio_tower, device=CPU)
+
+    def preprocess_dataset(self, sample: Dict) -> Dict:
+        return sample
+
+# 注册GPTQ模型
+MODEL_MAP["qwen2_5_omni"] = Qwen25OmniThinkerGPTQ
+SUPPORTED_MODELS.extend(["qwen2_5_omni"])
+
+# 定义speaker字典加载补丁
+@classmethod
+def patched_from_config(cls, config, *args, **kwargs):
+    kwargs.pop("trust_remote_code", None)
+    
+    model = cls._from_config(config, **kwargs)
+    
+    # 尝试加载speaker字典
+    try:
+        spk_path = cached_file(
+            config._name_or_path if hasattr(config, '_name_or_path') else "Qwen/Qwen2.5-Omni",
+            "spk_dict.pt",
+            subfolder=kwargs.pop("subfolder", None),
+            cache_dir=kwargs.pop("cache_dir", None),
+            force_download=kwargs.pop("force_download", False),
+            proxies=kwargs.pop("proxies", None),
+            resume_download=kwargs.pop("resume_download", None),
+            local_files_only=kwargs.pop("local_files_only", False),
+            token=kwargs.pop("use_auth_token", None),
+            revision=kwargs.pop("revision", None),
+        )
+        if spk_path is not None:
+            model.load_speakers(spk_path)
+            print("✅ Speaker字典加载成功")
+        else:
+            print("⚠️ Speaker字典未找到，跳过加载")
+    except Exception as e:
+        print(f"⚠️ Speaker字典加载失败: {e}")
+    
+    return model
+
+# 应用补丁
+Qwen2_5OmniForConditionalGeneration.from_config = patched_from_config
 
 
 class MultimodalProcessor:
@@ -40,24 +131,271 @@ class MultimodalProcessor:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model_path = os.getenv("MODEL_PATH", "/home/caden/models/Qwen2.5-Omni-3B")
         self.temp_files = []
+        self.use_gptq = os.getenv("USE_GPTQ", "false").lower() == "true"
+        self.gptq_model_path = os.getenv("GPTQ_MODEL_PATH", "")
+        
+    def _print_memory_usage(self, stage: str):
+        """打印不同阶段的显存占用统计"""
+        if not torch.cuda.is_available():
+            return
+            
+        print(f"\n🔍 {stage} - 显存占用统计:")
+        print(f"   当前显存占用: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"   显存缓存: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        print(f"   显存峰值: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+        
+        # 获取GPU信息
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            total_memory = props.total_memory / 1024**3
+            allocated = torch.cuda.memory_allocated(i) / 1024**3
+            cached = torch.cuda.memory_reserved(i) / 1024**3
+            free = total_memory - cached
+            
+            print(f"   GPU {i} ({props.name}):")
+            print(f"     总显存: {total_memory:.2f} GB")
+            print(f"     已分配: {allocated:.2f} GB")
+            print(f"     已缓存: {cached:.2f} GB")
+            print(f"     可用显存: {free:.2f} GB")
+        print()
+        
+    def _analyze_module_memory_usage(self, stage: str):
+        """分析Qwen2.5-Omni模型各个模块的显存/内存占用"""
+        if self.model is None:
+            return
+            
+        print(f"\n🔍 {stage} - 模块级资源占用分析:")
+        
+        # 定义主要模块及其路径
+        main_modules = {
+            "thinker": "thinker",
+            "talker": "talker", 
+            "token2wav": "token2wav",
+            "thinker.model": "thinker.model",
+            "thinker.visual": "thinker.visual",
+            "thinker.audio_tower": "thinker.audio_tower",
+            "thinker.lm_head": "thinker.lm_head"
+        }
+        
+        total_params = 0
+        total_trainable_params = 0
+        
+        for module_name, module_path in main_modules.items():
+            try:
+                # 获取模块对象
+                module = self.model
+                for attr in module_path.split('.'):
+                    if hasattr(module, attr):
+                        module = getattr(module, attr)
+                    else:
+                        module = None
+                        break
+                
+                if module is not None:
+                    # 统计参数数量
+                    module_params = sum(p.numel() for p in module.parameters())
+                    module_trainable_params = sum(p.numel() for p in module.parameters() if p.requires_grad)
+                    
+                    # 统计显存占用
+                    module_gpu_memory = 0
+                    module_cpu_memory = 0
+                    
+                    for param in module.parameters():
+                        if param.device.type == 'cuda':
+                            module_gpu_memory += param.numel() * param.element_size()
+                        else:
+                            module_cpu_memory += param.numel() * param.element_size()
+                    
+                    # 统计缓冲区显存
+                    for buffer in module.buffers():
+                        if buffer.device.type == 'cuda':
+                            module_gpu_memory += buffer.numel() * buffer.element_size()
+                        else:
+                            module_cpu_memory += buffer.numel() * buffer.element_size()
+                    
+                    total_params += module_params
+                    total_trainable_params += module_trainable_params
+                    
+                    print(f"   📊 {module_name}:")
+                    print(f"      参数数量: {module_params:,} ({module_params/1e6:.2f}M)")
+                    print(f"      可训练参数: {module_trainable_params:,} ({module_trainable_params/1e6:.2f}M)")
+                    print(f"      GPU显存: {module_gpu_memory/1024**3:.3f} GB")
+                    print(f"      CPU内存: {module_cpu_memory/1024**3:.3f} GB")
+                    
+                    # 显示设备位置
+                    if hasattr(module, 'device'):
+                        print(f"      设备位置: {module.device}")
+                    else:
+                        # 尝试从参数推断设备
+                        device = next(module.parameters()).device if list(module.parameters()) else "unknown"
+                        print(f"      设备位置: {device}")
+                        
+                else:
+                    print(f"   ❌ {module_name}: 模块不存在")
+                    
+            except Exception as e:
+                print(f"   ❌ {module_name}: 分析失败 - {e}")
+        
+        print(f"\n   📈 总计:")
+        print(f"      总参数: {total_params:,} ({total_params/1e6:.2f}M)")
+        print(f"      可训练参数: {total_trainable_params:,} ({total_trainable_params/1e6:.2f}M)")
+        
+        # 显示模型总显存占用
+        if torch.cuda.is_available():
+            model_gpu_memory = sum(p.numel() * p.element_size() for p in self.model.parameters() if p.device.type == 'cuda')
+            model_gpu_memory += sum(b.numel() * b.element_size() for b in self.model.buffers() if b.device.type == 'cuda')
+            print(f"      模型总GPU显存: {model_gpu_memory/1024**3:.3f} GB")
+        
+        print()
+        
+    def _monitor_inference_memory(self, modality_name: str):
+        """监控推理过程中特定模态的显存占用"""
+        class MemoryMonitor:
+            def __init__(self, name, processor):
+                self.name = name
+                self.processor = processor
+                self.start_memory = 0
+                self.peak_memory = 0
+                self.activation_memory = 0
+                self.hooks = []
+                
+            def __enter__(self):
+                if torch.cuda.is_available():
+                    # 记录开始时的显存状态
+                    torch.cuda.empty_cache()
+                    self.start_memory = torch.cuda.memory_allocated()
+                    self.peak_memory = self.start_memory
+                    
+                    # 设置钩子来监控激活值
+                    self._setup_hooks()
+                    
+                    print(f"🔍 开始监控 {self.name} 模态推理显存...")
+                    print(f"   初始显存: {self.start_memory / 1024**3:.3f} GB")
+                
+                return self
+                
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                if torch.cuda.is_available():
+                    # 移除钩子
+                    self._remove_hooks()
+                    
+                    # 计算最终统计
+                    final_memory = torch.cuda.memory_allocated()
+                    total_peak = torch.cuda.max_memory_allocated()
+                    
+                    # 计算激活显存（推理过程中的临时显存）
+                    self.activation_memory = max(0, total_peak - self.start_memory)
+                    
+                    print(f"🔍 {self.name} 模态推理完成 - 显存统计:")
+                    print(f"   初始显存: {self.start_memory / 1024**3:.3f} GB")
+                    print(f"   最终显存: {final_memory / 1024**3:.3f} GB")
+                    print(f"   峰值显存: {total_peak / 1024**3:.3f} GB")
+                    print(f"   激活显存: {self.activation_memory / 1024**3:.3f} GB")
+                    print(f"   推理增量: {(final_memory - self.start_memory) / 1024**3:.3f} GB")
+                    print()
+                    
+                    # 重置峰值统计
+                    torch.cuda.reset_peak_memory_stats()
+                
+            def _setup_hooks(self):
+                """设置钩子来监控激活值"""
+                def forward_hook(module, input, output):
+                    if torch.cuda.is_available():
+                        current_memory = torch.cuda.memory_allocated()
+                        self.peak_memory = max(self.peak_memory, current_memory)
+                        
+                        # 计算激活显存
+                        if hasattr(output, 'numel'):
+                            if hasattr(output, 'element_size'):
+                                activation_size = output.numel() * output.element_size()
+                            else:
+                                activation_size = output.numel() * 4  # 假设float32
+                            
+                            if output.device.type == 'cuda':
+                                self.activation_memory = max(self.activation_memory, activation_size)
+                
+                # 为关键模块添加钩子
+                if hasattr(self.processor.model, 'thinker'):
+                    if hasattr(self.processor.model.thinker, 'visual'):
+                        self.hooks.append(self.processor.model.thinker.visual.register_forward_hook(forward_hook))
+                    if hasattr(self.processor.model.thinker, 'audio_tower'):
+                        self.hooks.append(self.processor.model.thinker.audio_tower.register_forward_hook(forward_hook))
+                    if hasattr(self.processor.model.thinker, 'model'):
+                        self.hooks.append(self.processor.model.thinker.model.register_forward_hook(forward_hook))
+                
+                if hasattr(self.processor.model, 'talker'):
+                    self.hooks.append(self.processor.model.talker.register_forward_hook(forward_hook))
+                
+                if hasattr(self.processor.model, 'token2wav'):
+                    self.hooks.append(self.processor.model.token2wav.register_forward_hook(forward_hook))
+            
+            def _remove_hooks(self):
+                """移除所有钩子"""
+                for hook in self.hooks:
+                    hook.remove()
+                self.hooks.clear()
+        
+        return MemoryMonitor(modality_name, self)
         
     def load_model(self):
         """加载模型和处理器"""
         try:
-            print(f"正在加载模型: {self.model_path}")
-            # 标准模式但尝试优化显存
-            self.model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-                self.model_path,
-                torch_dtype=torch.float16,
-                trust_remote_code=True,
-                low_cpu_mem_usage=True,
-                device_map="auto"
-            )
-            print("📦 模型加载完成")
+            if self.use_gptq:
+                print(f"🚀 正在加载GPTQ量化模型: {self.gptq_model_path}")
+                
+                # 定义设备映射
+                device_map = {
+                    "thinker.model": "cuda", 
+                    "thinker.lm_head": "cuda", 
+                    "thinker.visual": "cpu",  
+                    "thinker.audio_tower": "cpu",  
+                    "talker": "cuda",  
+                    "token2wav": "cuda",  
+                }
+                
+                # 加载GPTQ模型
+                self.model = GPTQModel.load(
+                    self.gptq_model_path, 
+                    device_map=device_map, 
+                    torch_dtype=torch.float16,   
+                    attn_implementation="flash_attention_2"
+                )
+                print("📦 GPTQ模型加载完成")
+                
+                # 统计显存占用
+                if torch.cuda.is_available():
+                    self._print_memory_usage("GPTQ模型加载完成后")
+                
+                # 分析各模块资源占用
+                self._analyze_module_memory_usage("GPTQ模型加载完成后")
+                
+                # 加载处理器
+                self.processor = Qwen2_5OmniProcessor.from_pretrained(self.gptq_model_path)
+                print("处理器加载完成")
+                
+                return "✅ GPTQ量化模型加载成功"
+            else:
+                print(f"正在加载标准模型: {self.model_path}")
+                # 标准模式但尝试优化显存
+                self.model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
+                    self.model_path,
+                    torch_dtype=torch.float16,
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                    device_map="auto"
+                )
+                print("📦 模型加载完成")
 
-            self.processor = Qwen2_5OmniProcessor.from_pretrained(self.model_path)
-            print("处理器加载完成")
-            return "✅ 模型加载成功"
+                # 统计显存占用
+                if torch.cuda.is_available():
+                    self._print_memory_usage("标准模型加载完成后")
+                
+                # 分析各模块资源占用
+                self._analyze_module_memory_usage("标准模型加载完成后")
+                
+                self.processor = Qwen2_5OmniProcessor.from_pretrained(self.model_path)
+                print("处理器加载完成")
+                return "✅ 标准模型加载成功"
             
         except Exception as e:
             error_msg = f"❌ 模型加载失败: {e}"
@@ -185,6 +523,9 @@ class MultimodalProcessor:
             
             # 处理多模态信息
             audios, images, videos = process_mm_info(messages, use_audio_in_video=using_mm_info_audio)
+            if audios and not audio_input:
+                print("开启使用mm_info_audio提取的音频且没有音频输入，将使用mm_info_audio的音频")
+                messages.append({"role": "user", "content": [{"type": "audio", "audio": audios}]})
             print(f"📊 多模态处理结果: audios={len(audios) if audios else 0}, images={len(images) if images else 0}, videos={len(videos) if videos else 0}")
             
             # 处理输入
@@ -194,16 +535,37 @@ class MultimodalProcessor:
                 images=images, 
                 videos=videos, 
                 return_tensors="pt", 
+                use_audio_in_video= not audios.is_empty(),
                 padding=True
             )
             
             print(f"🔧 输入tensor形状: {[(k, v.shape if hasattr(v, 'shape') else type(v)) for k, v in inputs.items()]}")
             
-            # 标准模式：获取模型设备
-            device = next(self.model.parameters()).device
-            inputs = inputs.to(device).to(self.model.dtype)
+            # 根据模型类型处理输入
+            if self.use_gptq:
+                # GPTQ模型：直接发送到CUDA并转换为float16
+                inputs = inputs.to('cuda').to(torch.float16)
+                print("🔧 GPTQ模型输入已发送到CUDA并转换为float16")
+            else:
+                # 标准模型：获取模型设备
+                device = next(self.model.parameters()).device
+                inputs = inputs.to(device).to(self.model.dtype)
+                print(f"🔧 标准模型输入已发送到设备: {device}")
             
             print("🚀 开始生成回答...")
+            
+            # 根据输入模态类型确定监控名称
+            modality_types = []
+            if text_input and text_input.strip():
+                modality_types.append("文本")
+            if image_input:
+                modality_types.append("图像")
+            if audio_input:
+                modality_types.append("音频")
+            if video_input:
+                modality_types.append("视频")
+            
+            modality_name = "+".join(modality_types) if modality_types else "纯文本"
             
             if enable_streaming:
                 # 流式生成
@@ -235,47 +597,86 @@ class MultimodalProcessor:
                         pad_token_id=self.processor.tokenizer.eos_token_id
                     )
                     
-                    # 在单独线程中生成
-                    thread = threading.Thread(target=self.model.generate, kwargs=generation_kwargs)
-                    thread.start()
-                    
-                    # 流式读取生成的文本
-                    for new_text in streamer:
-                        response_text += new_text
-                        # 实时更新可以在这里处理，但gradio需要特殊处理
-                    
-                    thread.join()
+                    # 使用显存监控器监控推理过程
+                    with self._monitor_inference_memory(f"{modality_name}-流式推理"):
+                        # 在单独线程中生成
+                        thread = threading.Thread(target=self.model.generate, kwargs=generation_kwargs)
+                        thread.start()
+                        
+                        # 流式读取生成的文本
+                        for new_text in streamer:
+                            response_text += new_text
+                            # 实时更新可以在这里处理，但gradio需要特殊处理
+                        
+                        thread.join()
                 
                 print(f"📡 流式生成完成，总长度: {len(response_text)} 字符")
+                
+                # 流式模式下音频输出处理
+                if enable_audio_output and self.use_gptq:
+                    print("⚠️ GPTQ模型在流式模式下音频输出暂不支持，请使用标准模式")
+                    generated_audio = None
                 
             else:
                 # 标准生成
                 with torch.no_grad():
-                    output = self.model.generate(
-                        **inputs, 
-                        max_new_tokens=max_tokens,
-                        do_sample=False,  # 使用贪心解码
-                        use_audio_in_video=True,
-                        return_audio=enable_audio_output,  # 根据参数决定是否返回音频
-                        pad_token_id=self.processor.tokenizer.eos_token_id
-                    )
+                    # 使用显存监控器监控推理过程
+                    with self._monitor_inference_memory(f"{modality_name}-标准推理"):
+                        output = self.model.generate(
+                            **inputs, 
+                            max_new_tokens=max_tokens,
+                            use_audio_in_video=True,
+                            return_audio=enable_audio_output,  # 根据参数决定是否返回音频
+                            pad_token_id=self.processor.tokenizer.eos_token_id
+                        )
                 
-                print(f"📤 生成输出形状: {output.shape}")
+                print(f"📤 生成输出形状: {output[0].shape if enable_audio_output else output.shape}")
                 
-                # 处理音频输出
-                if enable_audio_output and hasattr(output, 'audio') and output.audio is not None:
+                # 处理音频输出 - 根据模型类型处理
+                if enable_audio_output:
                     try:
-                        # 保存生成的音频
-                        audio_filename = f"generated_audio_{int(time.time())}.wav"
-                        sf.write(audio_filename, output.audio.cpu().numpy(), 24000)  # Qwen2.5-Omni使用24kHz采样率
-                        generated_audio = audio_filename
-                        print(f"🎵 音频已生成并保存: {audio_filename}")
+                        if self.use_gptq:
+                            # GPTQ模型：检查output[2]是否为音频
+                            if len(output) > 1 and output[1] is not None:
+                                audio_data = output[1]
+                                if hasattr(audio_data, 'reshape'):
+                                    audio_data = audio_data.reshape(-1).detach().cpu().numpy()
+                                else:
+                                    audio_data = audio_data.cpu().numpy()
+                                
+                                audio_filename = f"generated_audio_gptq_{int(time.time())}.wav"
+                                sf.write(audio_filename, audio_data, 24000)
+                                generated_audio = audio_filename
+                                print(f"🎵 GPTQ音频已生成并保存: {audio_filename}")
+                            else:
+                                print("⚠️ GPTQ模型未返回音频")
+                                generated_audio = None
+                        else:
+                            # 标准模型：检查output.audio
+                            if hasattr(output, 'audio') and output.audio is not None:
+                                audio_filename = f"generated_audio_{int(time.time())}.wav"
+                                sf.write(audio_filename, output.audio.cpu().numpy(), 24000)
+                                generated_audio = audio_filename
+                                print(f"🎵 标准模型音频已生成并保存: {audio_filename}")
+                            else:
+                                print("⚠️ 标准模型未返回音频")
+                                generated_audio = None
                     except Exception as e:
                         print(f"音频保存失败: {e}")
                         generated_audio = None
                 
-                # 解码响应
-                response_text = self.processor.batch_decode(output, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+                # 解码响应 - 根据模型类型处理
+                if self.use_gptq:
+                    # GPTQ模型：output[0]是文本输出
+                    if len(output) > 1:
+                        response_text = self.processor.batch_decode(output[0], skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+                    elif len(output) == 1:
+                        response_text = self.processor.batch_decode(output, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+                    else:
+                        response_text = "GPTQ模型输出格式异常"
+                else:
+                    # 标准模型：直接解码
+                    response_text = self.processor.batch_decode(output, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
                 
                 print(f"📝 原始回答长度: {len(response_text)} 字符")
                 
@@ -508,6 +909,24 @@ def create_interface():
         with gr.Row():
             with gr.Column(scale=1):
                 gr.Markdown("### 🎛️ 模型控制")
+                
+                # 添加模型类型选择
+                model_type = gr.Radio(
+                    choices=["标准模型", "GPTQ量化模型"],
+                    value="标准模型",
+                    label="🚀 模型类型",
+                    info="选择要使用的模型类型"
+                )
+                
+                # 添加GPTQ模型路径输入
+                gptq_model_path = gr.Textbox(
+                    label="🔗 GPTQ模型路径",
+                    value="/home/caden/workplace/models/Qwen2.5-Omni-7B-GPTQ-Int4",
+                    placeholder="输入GPTQ模型路径或HuggingFace模型ID",
+                    visible=False,
+                    info="GPTQ量化模型的路径或HuggingFace模型ID"
+                )
+                
                 load_btn = gr.Button("🔄 加载模型", variant="primary")
                 model_status = gr.Textbox(
                     label="模型状态", 
@@ -637,8 +1056,37 @@ def create_interface():
         
         
         # 事件绑定
+        
+        # 模型类型选择控制GPTQ模型路径显示
+        def update_gptq_path_visibility(model_type):
+            if model_type == "GPTQ量化模型":
+                return gr.update(visible=True)
+            else:
+                return gr.update(visible=False)
+        
+        model_type.change(
+            fn=update_gptq_path_visibility,
+            inputs=[model_type],
+            outputs=[gptq_model_path]
+        )
+        
+        # 修改加载模型函数以支持模型类型选择
+        def load_model_with_type(model_type, gptq_path):
+            if model_type == "GPTQ量化模型":
+                # 设置GPTQ模型路径
+                processor.gptq_model_path = gptq_path
+                processor.use_gptq = True
+                print(f"🚀 准备加载GPTQ模型: {gptq_path}")
+            else:
+                # 使用标准模型
+                processor.use_gptq = False
+                print("🚀 准备加载标准模型")
+            
+            return processor.load_model()
+        
         load_btn.click(
-            fn=processor.load_model,
+            fn=load_model_with_type,
+            inputs=[model_type, gptq_model_path],
             outputs=model_status
         )
         

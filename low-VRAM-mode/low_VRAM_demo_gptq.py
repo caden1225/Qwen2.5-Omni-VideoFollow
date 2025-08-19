@@ -5,8 +5,8 @@ from transformers.utils.hub import cached_file
 
 from gptqmodel import GPTQModel
 from gptqmodel.models.base import BaseGPTQModel
-from gptqmodel.models.auto import MODEL_MAP
-from gptqmodel.models._const import CPU, SUPPORTED_MODELS
+from gptqmodel.models.auto import MODEL_MAP, SUPPORTED_MODELS
+from gptqmodel.models._const import CPU
 from huggingface_hub import snapshot_download
 
 from qwen_omni_utils import process_mm_info
@@ -16,8 +16,7 @@ import torch
 import time
 import soundfile as sf
 
-model_path = "Qwen/Qwen2.5-Omni-7B-GPTQ-Int4"
-model_path = snapshot_download(repo_id=model_path) # if you use local model file, delete this line
+model_path = "/home/caden/workplace/models/Qwen2.5-Omni-7B-GPTQ-Int4"
 
 class Qwen25OmniThinkerGPTQ(BaseGPTQModel):
     loader = Qwen2_5OmniForConditionalGeneration
@@ -53,6 +52,7 @@ class Qwen25OmniThinkerGPTQ(BaseGPTQModel):
         return sample
     
 
+# 注册GPTQ模型
 MODEL_MAP["qwen2_5_omni"] = Qwen25OmniThinkerGPTQ
 SUPPORTED_MODELS.extend(["qwen2_5_omni"])
 
@@ -109,7 +109,7 @@ def video_inference(video_path, prompt, sys_prompt):
                 {"type": "text", "text": sys_prompt},
             ]},
         {"role": "user", "content": [
-                {"type": "video", "video": video_path},
+                {"type": "text", "text": "你叫什么名？"},
             ]
         },
     ]
@@ -118,7 +118,7 @@ def video_inference(video_path, prompt, sys_prompt):
     audios, images, videos = process_mm_info(messages, use_audio_in_video=True)
     inputs = processor(text=text, audio=audios, images=images, videos=videos, return_tensors="pt", padding=True)
     inputs = inputs.to('cuda').to(model.dtype)
-    
+    print("#"*20, "processor done", "#"*20)
 
     output = model.generate(**inputs, use_audio_in_video=True, return_audio=True)
     text = processor.batch_decode(output[0], skip_special_tokens=True, clean_up_tokenization_spaces=False)
@@ -126,7 +126,7 @@ def video_inference(video_path, prompt, sys_prompt):
     return text, audio
 
 
-video_path = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen2.5-Omni/draw.mp4"
+video_path = "/home/caden/workplace/Qwen2.5-Omni-VideoFollow/data/OV右车窗.mp4"
 system_prompt = "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."
 
 torch.cuda.reset_peak_memory_stats()
