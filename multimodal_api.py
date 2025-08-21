@@ -24,15 +24,7 @@ from dotenv import load_dotenv
 
 # 导入qwen-omni-utils
 from qwen_omni_utils import process_mm_info
-from transformers import Qwen2_5OmniProcessor
-
-# 尝试导入模型
-try:
-    from modeling_qwen2_5_omni_low_VRAM_mode import Qwen2_5OmniForConditionalGeneration
-    LOW_VRAM_MODE = True
-except ImportError:
-    from transformers import Qwen2_5OmniForConditionalGeneration
-    LOW_VRAM_MODE = False
+from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniForConditionalGeneration
 
 # 加载环境变量
 load_dotenv()
@@ -47,8 +39,7 @@ class MultimodalRequest(BaseModel):
     text: Optional[str] = None
     system_prompt: str = "You are a helpful AI assistant."
     max_new_tokens: int = 512
-    extract_video_audio: bool = False  # 是否提取视频音轨
-    extract_video_frame: bool = False  # 是否提取视频最后一帧
+    voice: str = "Chelsie"  # 添加语音选择
 
 
 class MultimodalResponse(BaseModel):
@@ -70,29 +61,13 @@ class ModelManager:
         try:
             logger.info(f"Loading model from: {self.model_path}")
             
-            if LOW_VRAM_MODE:
-                # 使用低显存模式的设备映射
-                device_map = {
-                    "thinker.model": "cuda", 
-                    "thinker.lm_head": "cuda", 
-                    "thinker.visual": "cpu",  
-                    "thinker.audio_tower": "cpu",  
-                    "talker": "cuda",  
-                    "token2wav": "cuda",  
-                }
-                
-                self.model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-                    self.model_path,
-                    device_map=device_map,
-                    torch_dtype=torch.float16,
-                    trust_remote_code=True
-                )
-            else:
-                self.model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
-                    self.model_path,
-                    torch_dtype=torch.float16,
-                    trust_remote_code=True
-                ).to(self.device)
+            # 使用自动设备映射，简化模型加载
+            self.model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
+                self.model_path,
+                device_map="auto",
+                torch_dtype=torch.float16,
+                trust_remote_code=True
+            )
 
             self.processor = Qwen2_5OmniProcessor.from_pretrained(self.model_path)
             logger.info("Model and processor loaded successfully")
@@ -101,41 +76,6 @@ class ModelManager:
             logger.error(f"Failed to load model: {e}")
             raise
 
-    def extract_video_features(self, video_path: str, extract_audio: bool = False, extract_frame: bool = False):
-        """从视频中提取音频和帧"""
-        features = {}
-        
-        if extract_audio:
-            try:
-                # 使用librosa提取音频
-                audio, sr = librosa.load(video_path, sr=16000)
-                features['audio'] = audio
-                logger.info(f"Extracted audio from video: {len(audio)} samples at {sr}Hz")
-            except Exception as e:
-                logger.warning(f"Failed to extract audio: {e}")
-        
-        if extract_frame:
-            try:
-                # 使用opencv提取最后一帧
-                cap = cv2.VideoCapture(video_path)
-                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count - 1)
-                ret, frame = cap.read()
-                
-                if ret:
-                    # 转换为PIL Image
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    image = Image.fromarray(frame_rgb)
-                    features['last_frame'] = image
-                    logger.info("Extracted last frame from video")
-                else:
-                    logger.warning("Failed to extract frame")
-                cap.release()
-            except Exception as e:
-                logger.warning(f"Failed to extract frame: {e}")
-        
-        return features
-
     def process_multimodal_input(self, 
                                 text: str = None,
                                 images: List[Image.Image] = None,
@@ -143,69 +83,49 @@ class ModelManager:
                                 videos: List[str] = None,
                                 system_prompt: str = "You are a helpful AI assistant.",
                                 max_new_tokens: int = 512,
-                                extract_video_audio: bool = False,
-                                extract_video_frame: bool = False):
+                                voice: str = "Chelsie"):
         """处理多模态输入并生成响应"""
         
         start_time = time.time()
         torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None
         
         try:
-            # 构建消息格式
-            messages = [
-                {"role": "system", "content": [{"type": "text", "text": system_prompt}]},
-            ]
+            messages = []
+            messages.append({
+                "role": "system", 
+                "content": [{"type": "text", "text": system_prompt}]
+            })
             
-            user_content = []
-            
-            # 添加文本
+            # 添加文本消息
             if text:
-                user_content.append({"type": "text", "text": text})
+                messages.append({
+                    "role": "user",
+                    "content": [{"type": "text", "text": text}]
+                })
             
-            # 处理视频
-            if videos:
-                for video_path in videos:
-                    if extract_video_audio or extract_video_frame:
-                        features = self.extract_video_features(
-                            video_path, 
-                            extract_audio=extract_video_audio, 
-                            extract_frame=extract_video_frame
-                        )
-                        
-                        # 如果提取了音频，添加到音频列表
-                        if 'audio' in features:
-                            if audios is None:
-                                audios = []
-                            audios.append(features['audio'])
-                            # 添加音频内容
-                            user_content.append({"type": "audio", "audio": features['audio']})
-                        
-                        # 如果提取了帧，添加到图像列表
-                        if 'last_frame' in features:
-                            if images is None:
-                                images = []
-                            images.append(features['last_frame'])
-                            # 添加图像内容
-                            user_content.append({"type": "image", "image": features['last_frame']})
-                    else:
-                        # 直接添加视频
-                        user_content.append({"type": "video", "video": video_path})
-            
-            # 处理图像
+            # 添加图像消息
             if images:
                 for image in images:
-                    user_content.append({"type": "image", "image": image})
+                    messages.append({
+                        "role": "user",
+                        "content": [{"type": "image", "image": image}]
+                    })
             
-            # 处理音频
+            # 添加音频消息
             if audios:
                 for audio in audios:
-                    user_content.append({"type": "audio", "audio": audio})
+                    messages.append({
+                        "role": "user",
+                        "content": [{"type": "audio", "audio": audio}]
+                    })
             
-            # 如果没有任何内容，添加默认文本
-            if not user_content:
-                user_content.append({"type": "text", "text": "Hello"})
-                
-            messages.append({"role": "user", "content": user_content})
+            # 添加视频消息
+            if videos:
+                for video_path in videos:
+                    messages.append({
+                        "role": "user",
+                        "content": [{"type": "video", "video": video_path}]
+                    })
             
             # 应用聊天模板
             text_prompt = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -220,17 +140,18 @@ class ModelManager:
                 images=images_processed, 
                 videos=videos_processed, 
                 return_tensors="pt", 
-                padding=True
+                padding=True,
+                use_audio_in_video=True
             )
             
-            if LOW_VRAM_MODE:
-                inputs = {k: v.to('cuda').to(self.model.dtype) if hasattr(v, 'to') else v for k, v in inputs.items()}
-            else:
-                inputs = inputs.to(self.device).to(self.model.dtype)
+            # 移动到设备
+            inputs = inputs.to(self.model.device).to(self.model.dtype)
             
-            # 生成响应
-            output = self.model.generate(**inputs, max_new_tokens=max_new_tokens, use_audio_in_video=True)
-            response_text = self.processor.batch_decode(output[0], skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+            # 生成响应，支持语音输出
+            text_output, audio_output = self.model.generate(**inputs, max_new_tokens=max_new_tokens, use_audio_in_video=True, speaker=voice)
+            
+            # 解码文本响应
+            response_text = self.processor.batch_decode(text_output, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
             
             # 计算处理时间和内存使用
             processing_time = time.time() - start_time
@@ -279,8 +200,11 @@ async def multimodal_inference(
         # 处理图像文件
         if images:
             for img_file in images:
-                image = Image.open(img_file.file)
-                processed_images.append(image)
+                # 保存临时文件
+                temp_path = f"temp_image_{int(time.time())}_{img_file.filename}"
+                with open(temp_path, "wb") as f:
+                    f.write(await img_file.read())
+                processed_images.append(temp_path)
         
         # 处理音频文件
         if audios:
@@ -289,14 +213,8 @@ async def multimodal_inference(
                 temp_path = f"temp_audio_{int(time.time())}_{audio_file.filename}"
                 with open(temp_path, "wb") as f:
                     f.write(await audio_file.read())
+                processed_audios.append(temp_path)
                 
-                # 加载音频
-                audio_data, _ = librosa.load(temp_path, sr=16000)
-                processed_audios.append(audio_data)
-                
-                # 清理临时文件
-                os.remove(temp_path)
-        
         # 处理视频文件
         if videos:
             for video_file in videos:
@@ -314,12 +232,11 @@ async def multimodal_inference(
             videos=processed_videos if processed_videos else None,
             system_prompt=request.system_prompt,
             max_new_tokens=request.max_new_tokens,
-            extract_video_audio=request.extract_video_audio,
-            extract_video_frame=request.extract_video_frame
+            voice=request.voice
         )
         
-        # 清理临时视频文件
-        for temp_path in processed_videos:
+        # 清理临时文件
+        for temp_path in processed_images + processed_audios + processed_videos:
             try:
                 os.remove(temp_path)
             except:

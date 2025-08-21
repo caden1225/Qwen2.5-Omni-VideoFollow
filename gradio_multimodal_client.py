@@ -321,7 +321,6 @@ processor = MultimodalProcessor()
 def create_interface():
     with gr.Blocks(title="Qwen2.5-Omni 多模态助手 (API客户端)", theme=gr.themes.Soft()) as demo:
         gr.Markdown("""
-        # 🤖 Qwen2.5-Omni 多模态智能助手 (API客户端)
         ## 📡 通过vLLM API服务提供多模态AI能力
         """)
         
@@ -412,14 +411,13 @@ def create_interface():
                         video_input = gr.Video(
                             label="🎬 视频输入"
                         )
-                
+
                 with gr.Row():
                     process_btn = gr.Button("🚀 开始处理", variant="primary", size="lg")
-                    stream_btn = gr.Button("📡 流式处理", variant="secondary", size="lg", visible=False)
-                clear_btn = gr.Button("🗑️ 清空", variant="secondary")
+                    clear_btn = gr.Button("🗑️ 清空", variant="secondary")
         
         with gr.Row():
-            with gr.Column(scale=2):
+            with gr.Column():
                 gr.Markdown("### 💬 生成结果")
                 output_text = gr.Textbox(
                     label="AI回答",
@@ -427,26 +425,7 @@ def create_interface():
                     placeholder="生成的回答将显示在这里...",
                     interactive=False
                 )
-                
-                # 显示提取的内容
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("### 🎵 提取的音频")
-                        extracted_audio_display = gr.Audio(
-                            label="从视频提取的音频",
-                            visible=True,
-                            interactive=False
-                        )
-                    
-                    with gr.Column():
-                        gr.Markdown("### 🖼️ 提取的图像")
-                        extracted_image_display = gr.Image(
-                            label="从视频提取的最后一帧",
-                            type="pil",
-                            visible=True,
-                            interactive=False
-                        )
-                
+            with gr.Column():
                 # 显示生成的音频输出
                 gr.Markdown("### 🎤 生成的语音回答")
                 generated_audio_display = gr.Audio(
@@ -454,7 +433,23 @@ def create_interface():
                     visible=True,
                     interactive=False
                 )
-            
+        # 显示提取的内容
+        with gr.Row():
+            with gr.Column():
+                gr.Markdown("### 🎵 提取的音频")
+                extracted_audio_display = gr.Audio(
+                    label="从视频提取的音频",
+                    visible=True,
+                    interactive=False
+                )
+            with gr.Column():
+                gr.Markdown("### 🖼️ 提取的图像")
+                extracted_image_display = gr.Image(
+                    label="从视频提取的最后一帧",
+                    type="pil",
+                    visible=True,
+                    interactive=False
+                        )
             with gr.Column(scale=1):
                 gr.Markdown("### 📊 处理信息")
                 processing_info = gr.Textbox(
@@ -464,8 +459,8 @@ def create_interface():
                     value="等待处理..."
                 )
         
+
         # 事件绑定
-        
         def check_api_connection(api_url):
             """检查API连接"""
             processor.api_client.api_base_url = api_url
@@ -505,20 +500,6 @@ def create_interface():
             outputs=[processing_info, output_text, extracted_audio_display, extracted_image_display, generated_audio_display]
         )
         
-        
-        # 根据流式开关控制按钮显示
-        def update_buttons(enable_streaming):
-            if enable_streaming:
-                return gr.update(value="🚀 标准处理"), gr.update(visible=True)
-            else:
-                return gr.update(value="🚀 开始处理"), gr.update(visible=False)
-        
-        enable_streaming.change(
-            fn=update_buttons,
-            inputs=[enable_streaming],
-            outputs=[process_btn, stream_btn]
-        )
-        
         def clear_all():
             return "", None, None, None, "", "等待处理...", None, None, False, None
         
@@ -542,7 +523,7 @@ if __name__ == "__main__":
     # 启动服务
     demo.launch(
         server_name="0.0.0.0",
-        server_port=7861,
+        server_port=7862,
         share=False,
         debug=True,
         show_error=True

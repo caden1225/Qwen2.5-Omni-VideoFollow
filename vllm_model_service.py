@@ -310,11 +310,6 @@ class ModelService:
             if self.use_vllm:
                 print(f"🚀 正在使用vLLM加载模型: {self.vllm_model_path}")
                 
-                # 检查vLLM兼容性
-                if not self._check_vllm_compatibility():
-                    print("❌ vLLM兼容性检查失败，尝试回退模式")
-                    return self._try_fallback_mode()
-                
                 # 设置视频处理相关的环境变量
                 os.environ.setdefault('VIDEO_MAX_PIXELS', str(32000 * 28 * 28))
                 print(f"🔧 设置VIDEO_MAX_PIXELS: {os.environ.get('VIDEO_MAX_PIXELS')}")
@@ -378,8 +373,6 @@ class ModelService:
                         print("✅ 使用简化配置初始化成功")
                     except Exception as e2:
                         print(f"❌ 简化配置也失败: {e2}")
-                        print("🔄 vLLM完全失败，尝试回退模式")
-                        return self._try_fallback_mode()
                 
                 print("📦 vLLM模型加载完成")
                 self.vllm_available = True
@@ -407,7 +400,6 @@ class ModelService:
                 return True
             else:
                 print(f"⚠️ 未启用vLLM，尝试回退模式")
-                return self._try_fallback_mode()
                 
         except Exception as e:
             error_msg = self._handle_vllm_error(e, "模型加载")
